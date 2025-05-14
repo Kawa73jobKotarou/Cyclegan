@@ -48,6 +48,8 @@ if __name__ == '__main__':
             if epoch == opt.epoch_count and i == 0:
                 # LSeSimを使うときに必要
                 model.data_dependent_initialize(data)
+                model.parallelize()
+                model.print_networks(True)
 
             total_iters += opt.batch_size
             epoch_iter += opt.batch_size
