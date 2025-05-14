@@ -45,6 +45,10 @@ if __name__ == '__main__':
             if total_iters % opt.print_freq == 0:
                 t_data = iter_start_time - iter_data_time
 
+            if epoch == opt.epoch_count and i == 0:
+                # LSeSimを使うときに必要
+                model.data_dependent_initialize(data)
+
             total_iters += opt.batch_size
             epoch_iter += opt.batch_size
             model.set_input(data)         # unpack data from dataset and apply preprocessing
