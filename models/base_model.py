@@ -88,6 +88,9 @@ class BaseModel(ABC):
             self.load_networks(load_suffix)
         self.print_networks(opt.verbose)
 
+    def data_dependent_initialize(self, data):
+        pass
+    
     def eval(self):
         """Make models eval mode during test time"""
         for name in self.model_names:
