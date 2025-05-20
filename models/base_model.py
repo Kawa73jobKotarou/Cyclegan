@@ -202,7 +202,14 @@ class BaseModel(ABC):
                 state_dict = torch.load(load_path, map_location=str(self.device))
                 if hasattr(state_dict, '_metadata'):
                     del state_dict._metadata
-
+                # === 'module.' を含むキーが存在する場合のみ、自動で除去 ===
+                if any(k.startswith('module.') for k in state_dict.keys()):
+                    print('Detected "module." prefix in state_dict. Removing it automatically.')
+                    new_state_dict = {}
+                    for k, v in state_dict.items():
+                        new_key = k.replace('module.', '', 1)
+                        new_state_dict[new_key] = v
+                    state_dict = new_state_dict
                 # patch InstanceNorm checkpoints prior to 0.4
                 for key in list(state_dict.keys()):  # need to copy keys here because we mutate in loop
                     self.__patch_instance_norm_state_dict(state_dict, net, key.split('.'))
