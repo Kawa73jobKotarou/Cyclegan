@@ -45,11 +45,12 @@ if __name__ == '__main__':
             if total_iters % opt.print_freq == 0:
                 t_data = iter_start_time - iter_data_time
 
-            if epoch == opt.epoch_count and i == 0:
-                # LSeSimを使うときに必要
-                model.data_dependent_initialize(data)
-                model.parallelize()
-                model.print_networks(True)
+            if opt.model != "cycle_gan":
+                if epoch == opt.epoch_count and i == 0:
+                    # LSeSimを使うときに必要
+                    model.data_dependent_initialize(data)
+                    model.parallelize()
+                    model.print_networks(True)
 
             total_iters += opt.batch_size
             epoch_iter += opt.batch_size
