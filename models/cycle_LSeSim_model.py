@@ -262,7 +262,7 @@ class CycleLSeSimModel(BaseModel):
         self.loss_G_A_s = self.Spatial_Loss(self.netPre, norm_real_A, norm_fake_B, None) * l_sptial if l_sptial > 0 else 0
 
         # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_style + self.loss_style + self.loss_G_A_s
+        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s
         self.loss_G.backward()
 
     def optimize_parameters(self):

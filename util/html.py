@@ -1,5 +1,5 @@
 import dominate
-from dominate.tags import meta, h3, table, tr, td, p, a, img, br
+from dominate.tags import meta, h3, table, tr, td, p, a, img, br, style
 import os
 
 
@@ -28,9 +28,10 @@ class HTML:
             os.makedirs(self.img_dir)
 
         self.doc = dominate.document(title=title)
-        if refresh > 0:
-            with self.doc.head:
+        with self.doc.head:
+            if refresh > 0:
                 meta(http_equiv="refresh", content=str(refresh))
+            style("img { transform: rotate(90deg); }")  # ← ここで画像を90度回転させるスタイルを追加
 
     def get_image_dir(self):
         """Return the directory that stores images"""
