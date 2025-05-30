@@ -271,7 +271,7 @@ class CycleLSeSimModel(BaseModel):
         self.loss_per = self.criterionFeature(norm_real_A, norm_fake_B) * l_per if l_per > 0 else 0
         self.loss_G_A_s = self.Spatial_Loss(self.netPre, norm_real_A, norm_fake_B, None) * l_sptial if l_sptial > 0 else 0
         # CTのpixelベースの損失
-        self.loss_CT = self.criterionCT(self.fake_B,self.real_A) * l_CT if self.opt.use_CTloss else 0
+        self.loss_CT = self.criterionCT(self.fake_B,self.real_B) * l_CT if self.opt.use_CTloss else 0
 
         # combined loss and calculate gradients
         self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT
