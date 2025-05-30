@@ -53,6 +53,8 @@ class CycleLSeSimModel(BaseModel):
             parser.add_argument('--lambda_spatial', type=float, default=10.0, help='weight for spatially-correlative loss')
             parser.add_argument('--lambda_perceptual', type=float, default=0.0, help='weight for feature consistency loss')
             parser.add_argument('--lambda_style', type=float, default=0.0, help='weight for style loss')
+            parser.add_argument('--use_CTloss', action='store_true', help='use the CT loss')
+            parser.add_argument('--lambda_CT', type=float, default=10.0, help='weight for CT loss')
         return parser
 
     def __init__(self, opt):
@@ -70,6 +72,9 @@ class CycleLSeSimModel(BaseModel):
         if self.isTrain and self.opt.lambda_identity > 0.0:  # if identity loss is used, we also visualize idt_B=G_A(B) ad idt_A=G_A(B)
             visual_names_A.append('idt_B')
             visual_names_B.append('idt_A')
+
+        if self.opt.use_CTloss:
+            self.loss_names.append('CT')
 
         self.input_nc = opt.input_nc
 
@@ -113,6 +118,9 @@ class CycleLSeSimModel(BaseModel):
             self.criterionSpatial = networks.SpatialCorrelativeLoss(opt.loss_mode, opt.patch_nums, opt.patch_size, opt.use_norm,
                                     opt.learned_attn, gpu_ids=self.gpu_ids, T=opt.T).to(self.device)
             self.normalization = networks.Normalization(self.device)
+            # realCTとfakeCTでpixelベースのlossを取得
+            self.criterionCT = torch.nn.L1Loss()
+
             # define the contrastive loss
             if opt.learned_attn:
                 self.netF = self.criterionSpatial
@@ -226,6 +234,8 @@ class CycleLSeSimModel(BaseModel):
         l_style = self.opt.lambda_style
         l_per = self.opt.lambda_perceptual
         l_sptial = self.opt.lambda_spatial
+        # CTのpixelベースの損失
+        l_CT = self.opt.lambda_CT
 
         # Identity loss
         if lambda_idt > 0:
@@ -260,9 +270,11 @@ class CycleLSeSimModel(BaseModel):
         self.loss_style = self.criterionStyle(norm_real_B, norm_fake_B) * l_style if l_style > 0 else 0
         self.loss_per = self.criterionFeature(norm_real_A, norm_fake_B) * l_per if l_per > 0 else 0
         self.loss_G_A_s = self.Spatial_Loss(self.netPre, norm_real_A, norm_fake_B, None) * l_sptial if l_sptial > 0 else 0
+        # CTのpixelベースの損失
+        self.loss_CT = self.criterionCT(self.fake_B,self.real_A) * l_CT if self.opt.use_CTloss else 0
 
         # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s
+        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT
         self.loss_G.backward()
 
     def optimize_parameters(self):
