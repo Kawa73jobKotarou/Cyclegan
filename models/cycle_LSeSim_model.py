@@ -73,7 +73,7 @@ class CycleLSeSimModel(BaseModel):
             visual_names_A.append('idt_B')
             visual_names_B.append('idt_A')
 
-        if self.opt.use_CTloss:
+        if self.isTrain and self.opt.use_CTloss:
             self.loss_names.append('CT')
 
         self.input_nc = opt.input_nc
