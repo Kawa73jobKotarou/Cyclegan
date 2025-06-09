@@ -248,7 +248,6 @@ class CycleLSeSimModel(BaseModel):
         else:
             self.loss_idt_A = 0
             self.loss_idt_B = 0
-
         # GAN loss D_A(G_A(A))
         self.loss_G_A = self.criterionGAN(self.netD_A(self.fake_B), True)
         # GAN loss D_B(G_B(B))
