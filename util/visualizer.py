@@ -87,17 +87,26 @@ def save_images(webpage, visuals, image_path, opt, aspect_ratio=1.0, width=256, 
     This function will save images stored in 'visuals' to the HTML file specified by 'webpage'.
     """
     image_dir = webpage.get_image_dir()
-    short_path = ntpath.basename(image_path[0])
-    name = os.path.splitext(short_path)[0]
-    name = name.split('.', 1)[0]
+    image_path_0 = os.path.abspath(image_path[0])
+    # "testA" の位置を探す
+    split_token = os.sep + 'testA' + os.sep
+    if split_token in image_path_0:
+        relative_path = image_path_0.split(split_token)[1]  # → '03_01/MR_03_01.dcm'
+    else:
+        raise ValueError(f"'testA' not found in path: {image_path_0}")
+    name = os.path.splitext(relative_path)[0]  # → 03_01/MR_03_01
     webpage.add_header(name)
     ims, txts, links = [], [], []
     ims_dict = {}
     for label, im_data in visuals.items():
         im = util.tensor2im(im_data)
-        im = im[:, :, int((opt.input_nc-1)/2)]
-        image_name = '%s_%s.png' % (name, label)
+        im = im[:, :, int((opt.input_nc - 1) / 2)]
+        # 拡張子付きファイル名を作成
+        image_name = f"{name}_{label}.png"  # → 03_01/MR_03_01_real_A.png
+        # サブフォルダ付きで保存パスを作成
         save_path = os.path.join(image_dir, image_name)
+        # サブフォルダがなければ作成
+        os.makedirs(os.path.dirname(save_path), exist_ok=True)
         util.save_image(im, save_path, aspect_ratio=aspect_ratio)
         ims.append(image_name)
         txts.append(label)
