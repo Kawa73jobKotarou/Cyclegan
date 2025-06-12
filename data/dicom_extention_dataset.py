@@ -351,7 +351,6 @@ class DicomExtentionDataset(BaseDataset):
                 A_dcm = pydicom.dcmread(path)
                 A_img = self.preprocess(A_dcm.pixel_array, crop_start_width, crop_start_height, self.opt, is_CT=False)
                 A_slices.append(A_img)
-
                 # Determine bone presence for each A slice
                 bone_A_presence = 0 
                 if self.opt.phase == "train":
@@ -361,6 +360,7 @@ class DicomExtentionDataset(BaseDataset):
                     A_mask = self.preprocess(A_mask, crop_start_width, crop_start_height, self.opt, is_CT=False)
                     if A_mask.max() == 1.0: # 画素値1が骨を示す場合
                         bone_A_presence = 1 # 骨あり
+
                 A_bone_presence_list.append(bone_A_presence)
 
             A = torch.cat(A_slices, dim=0)  # (5, 256, 256)
@@ -403,7 +403,7 @@ class DicomExtentionDataset(BaseDataset):
                 A = torch.cat(A, dim=0)  # [5, 1, 128, 128]
                 B = [transform(img, do_flip_lr, do_flip_ud, rotation, 1) for img in B]
                 B = torch.cat(B, dim=0)  # [5, 1, H, W]
-
+                
             return {
                 'A': A,
                 'B': B,

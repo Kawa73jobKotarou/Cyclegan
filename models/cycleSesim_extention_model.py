@@ -55,6 +55,7 @@ class CycleSeSimExtentionModel(BaseModel):
             parser.add_argument('--lambda_style', type=float, default=0.0, help='weight for style loss')
             parser.add_argument('--use_CTloss', action='store_true', help='use the CT loss')
             parser.add_argument('--lambda_CT', type=float, default=10.0, help='weight for CT loss')
+            parser.add_argument('--lambda_Bone', type=float, default=10.0, help='weight for Bone loss')
         return parser
 
     def __init__(self, opt):
@@ -76,6 +77,8 @@ class CycleSeSimExtentionModel(BaseModel):
         if self.isTrain and self.opt.use_CTloss:
             self.loss_names.append('CT')
 
+        self.loss_names.append('Bone')
+
         self.input_nc = opt.input_nc
 
 
@@ -89,9 +92,9 @@ class CycleSeSimExtentionModel(BaseModel):
         # define networks (both Generators and discriminators)
         # The naming is different from those used in the paper.
         # Code (vs. paper): G_A (G), G_B (F), D_A (D_Y), D_B (D_X)
-        self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
+        self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, 'resnet_extention', opt.norm,
                                         not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
-        self.netG_B = networks.define_G(opt.output_nc, opt.input_nc, opt.ngf, opt.netG, opt.norm,
+        self.netG_B = networks.define_G(opt.output_nc, opt.input_nc, opt.ngf, 'resnet_extention', opt.norm,
                                         not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:  # define discriminators
@@ -120,6 +123,8 @@ class CycleSeSimExtentionModel(BaseModel):
             self.normalization = networks.Normalization(self.device)
             # realCTとfakeCTでpixelベースのlossを取得
             self.criterionCT = torch.nn.L1Loss()
+            # 骨の有無の損失関数
+            self.criterionBone = torch.nn.BCELoss()
 
             # define the contrastive loss
             if opt.learned_attn:
@@ -170,12 +175,29 @@ class CycleSeSimExtentionModel(BaseModel):
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
+        self.patch_coords = torch.stack(input['A_patch_coords'], dim=0).to(self.device).float()
+        # shape が (2, 4) の場合に、(4, 2) に転置する
+        if self.patch_coords.shape[0] == 2 and self.patch_coords.shape[1] == input['A'].shape[0]:
+            self.patch_coords = self.patch_coords.T # .T は転置 (transpose)
+
+        self.patch_size = input['patch_size'].to(self.device).float()
+        if self.patch_size.ndim == 1: # (Batch_size,) の場合
+            self.patch_size = self.patch_size.unsqueeze(1) # (Batch_size, 1) にする
+
+        self.A_bone_presence = torch.stack(input['A_bone_presence'], dim=0).to(self.device).float()
+        if self.A_bone_presence.shape[0] == input['A'].shape[1] and self.A_bone_presence.shape[1] == input['A'].shape[0]:
+            self.A_bone_presence = self.A_bone_presence.T
+            
+        self.B_bone_presence = torch.stack(input['B_bone_presence'], dim=0).to(self.device).float()
+        if self.B_bone_presence.shape[0] == input['B'].shape[1] and self.B_bone_presence.shape[1] == input['B'].shape[0]:
+            self.B_bone_presence = self.B_bone_presence.T
+
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
-        self.fake_B = self.netG_A(self.real_A)  # G_A(A)
-        self.rec_A = self.netG_B(self.fake_B)   # G_B(G_A(A))
-        self.fake_A = self.netG_B(self.real_B)  # G_B(B)
-        self.rec_B = self.netG_A(self.fake_A)   # G_A(G_B(B))
+        self.fake_B, self.realA_bone_prediction = self.netG_A(self.real_A, self.patch_coords, self.patch_size)  # G_A(A)
+        self.rec_A, _ = self.netG_B(self.fake_B, self.patch_coords, self.patch_size)   # G_B(G_A(A))
+        self.fake_A, self.realB_bone_prediction = self.netG_B(self.real_B, self.patch_coords, self.patch_size)  # G_B(B)
+        self.rec_B, _ = self.netG_A(self.fake_A, self.patch_coords, self.patch_size)   # G_A(G_B(B))
 
     def backward_F(self):
         """
@@ -236,14 +258,16 @@ class CycleSeSimExtentionModel(BaseModel):
         l_sptial = self.opt.lambda_spatial
         # CTのpixelベースの損失
         l_CT = self.opt.lambda_CT
+        # Boneの識別の損失
+        l_Bone = self.opt.lambda_Bone
 
         # Identity loss
         if lambda_idt > 0:
             # G_A should be identity if real_B is fed: ||G_A(B) - B||
-            self.idt_A = self.netG_A(self.real_B)
+            self.idt_A, _ = self.netG_A(self.real_B, self.patch_coords, self.patch_size)
             self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
             # G_B should be identity if real_A is fed: ||G_B(A) - A||
-            self.idt_B = self.netG_B(self.real_A)
+            self.idt_B, _ = self.netG_B(self.real_A, self.patch_coords, self.patch_size)
             self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
         else:
             self.loss_idt_A = 0
@@ -260,20 +284,24 @@ class CycleSeSimExtentionModel(BaseModel):
         # LSeSimで追加（style loss, perceptial loss, structure loss）
         if self.input_nc == 1:
             norm_real_A = self.normalization((self.real_A + 1) * 0.5)
+            norm_fake_B = self.normalization((self.fake_B + 1) * 0.5) 
+            norm_real_B = self.normalization((self.real_B + 1) * 0.5)
         else:
             center_channel = (self.input_nc-1)/2
             center_channel = int(center_channel)
             norm_real_A = self.normalization((self.real_A[:, center_channel:center_channel+1, :, :] + 1)* 0.5)
-        norm_fake_B = self.normalization((self.fake_B[:, center_channel:center_channel+1, :, :] + 1) * 0.5)
-        norm_real_B = self.normalization((self.real_B[:, center_channel:center_channel+1, :, :] + 1) * 0.5)
+            norm_fake_B = self.normalization((self.fake_B[:, center_channel:center_channel+1, :, :] + 1) * 0.5)
+            norm_real_B = self.normalization((self.real_B[:, center_channel:center_channel+1, :, :] + 1) * 0.5)
         self.loss_style = self.criterionStyle(norm_real_B, norm_fake_B) * l_style if l_style > 0 else 0
         self.loss_per = self.criterionFeature(norm_real_A, norm_fake_B) * l_per if l_per > 0 else 0
         self.loss_G_A_s = self.Spatial_Loss(self.netPre, norm_real_A, norm_fake_B, None) * l_sptial if l_sptial > 0 else 0
         # CTのpixelベースの損失
         self.loss_CT = self.criterionCT(self.fake_B,self.real_B) * l_CT if self.opt.use_CTloss else 0
+        # Boneの識別の損失
+        self.loss_Bone = (self.criterionBone(self.realA_bone_prediction, self.A_bone_presence) + self.criterionBone(self.realB_bone_prediction, self.B_bone_presence)) * l_Bone 
 
         # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT
+        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT + self.loss_Bone
         self.loss_G.backward()
 
     def optimize_parameters(self):
