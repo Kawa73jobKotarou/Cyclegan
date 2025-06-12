@@ -160,6 +160,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
         net = UnetGenerator(input_nc, output_nc, 8, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'hayashi':
        net = ResnetGenerator(input_nc, output_nc, ngf=64, norm_layer=nn.InstanceNorm2d, use_dropout=False, n_blocks=9, padding_type='reflect', activation = "sigmoid")
+    elif netG == 'resnet_extention':
+       net = ResnetExtentionGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
     else:
         raise NotImplementedError('Generator model name [%s] is not recognized' % netG)
     return init_net(net, init_type, init_gain, gpu_ids)
@@ -440,6 +442,187 @@ class ResnetBlock(nn.Module):
         """Forward function (with skip connections)"""
         out = x + self.conv_block(x)  # add skip connections
         return out
+
+# ResnetBlock の定義は変更しないので、省略します
+
+class ResnetExtentionGenerator(nn.Module):
+    """
+    ResnetGenerator をベースに、追加の入力（座標、サイズ）と、
+    ダウンサンプリング層からの骨有無予測出力を備えたジェネレーター。
+    各入力スライス（5枚）に対して骨有無を予測します。
+    """
+
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect', activation="tanh"):
+        """Construct a Resnet-based generator with extended functionalities.
+
+        Parameters:
+            input_nc (int)      -- 入力画像のチャネル数 (今回は5枚重ねなので5を想定)
+            output_nc (int)     -- 出力画像のチャネル数
+            ngf (int)           -- 最初の Conv 層のフィルター数
+            norm_layer          -- 正規化層
+            use_dropout (bool)  -- ドロップアウト層を使用するか
+            n_blocks (int)      -- ResNet ブロックの数
+            padding_type (str)  -- パディングの種類: reflect | replicate | zero
+        """
+        assert(n_blocks >= 0)
+        super(ResnetExtentionGenerator, self).__init__()
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        # ----------------------------------------------------
+        # 1. 初期入力層 (座標、サイズ情報を結合するために input_nc を調整)
+        # ----------------------------------------------------
+        # 今回は5枚重ねの画像が入力されるので、input_nc は5（またはそれ以上）になるはずです。
+        # 座標情報（x,yの2チャネル）とサイズ情報（1チャネル）を結合するので、
+        # 最初の Conv2d の入力チャネル数は input_nc + 3 となります。
+        input_nc_adjusted = input_nc + 3 
+
+        self.initial_conv_block = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(input_nc_adjusted, ngf, kernel_size=7, padding=0, bias=use_bias),
+            norm_layer(ngf),
+            nn.ReLU(True)
+        )
+
+        # ----------------------------------------------------
+        # 2. ダウンサンプリング層
+        # ----------------------------------------------------
+        n_downsampling = 2
+        self.downsample_layers = nn.ModuleList() 
+
+        for i in range(n_downsampling):
+            mult = 2 ** i
+            down_layer = nn.Sequential(
+                nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                norm_layer(ngf * mult * 2),
+                nn.ReLU(True)
+            )
+            self.downsample_layers.append(down_layer)
+
+        # ----------------------------------------------------
+        # 3. ResNetブロック
+        # ----------------------------------------------------
+        mult = 2 ** n_downsampling
+        self.resnet_blocks = nn.ModuleList() 
+
+        for i in range(n_blocks):
+            resnet_block = ResnetBlock(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)
+            self.resnet_blocks.append(resnet_block)
+
+        # ----------------------------------------------------
+        # 4. 骨有無予測器 (ダウンサンプリングの最後の層の特徴マップから分岐)
+        # ----------------------------------------------------
+        # ダウンサンプリングの最後の層の出力チャネル数は ngf * mult
+        # 各スライスごとに0/1の予測をしたいので、出力チャネル数を入力画像のチャネル数 (input_nc) に合わせます。
+        # ここでは input_nc が入力画像の枚数（今回は5）に対応していると仮定します。
+        self.bone_predictor = nn.Sequential(
+            nn.AdaptiveAvgPool2d(1), # 特徴マップを1x1に集約 (グローバル平均プーリング)
+            nn.Conv2d(ngf * mult, input_nc, kernel_size=1), # 出力チャネル数を input_nc (5) に設定
+            nn.Flatten(), # (Batch, input_nc, 1, 1) -> (Batch, input_nc)
+            nn.Sigmoid() # 0-1の確率を出力
+        )
+
+        # ----------------------------------------------------
+        # 5. アップサンプリング層
+        # ----------------------------------------------------
+        self.upsample_layers = nn.ModuleList() 
+
+        for i in range(n_downsampling):
+            mult = 2 ** (n_downsampling - i)
+            up_layer = nn.Sequential(
+                nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                   kernel_size=3, stride=2,
+                                   padding=1, output_padding=1,
+                                   bias=use_bias),
+                norm_layer(int(ngf * mult / 2)),
+                nn.ReLU(True)
+            )
+            self.upsample_layers.append(up_layer)
+        
+        # ----------------------------------------------------
+        # 6. 最終出力層
+        #----------------------------------------------------
+        self.final_output_layer = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)
+        )
+        # 活性化関数は最後に適用
+        if activation == "sigmoid":
+            self.output_activation = nn.Sigmoid()
+        else:
+            self.output_activation = nn.Tanh()
+
+    def forward(self, input_image, patch_coords, patch_size):
+        """Extended forward function.
+
+        Parameters:
+            input_image (Tensor): 入力画像 (Batch_size, input_nc, H, W)
+                                  input_nc は入力スライスの枚数（今回は5を想定）
+            patch_coords (Tensor): パッチの開始座標 (Batch_size, 2)
+            patch_size (Tensor): パッチのサイズ (Batch_size, 1)
+        Returns:
+            Tuple[Tensor, Tensor]: (生成された画像, 各スライスの骨有無の予測確率配列)
+        """
+        batch_size, num_slices_input, H, W = input_image.shape
+
+        # ----------------------------------------------------
+        # 1. 座標情報とサイズ情報の特徴マップを生成し、入力画像に結合
+        # ----------------------------------------------------
+        # 座標マップ (Batch_size, 1, H, W)
+        coord_x_map = patch_coords[:, 0].view(batch_size, 1, 1, 1).expand(-1, -1, H, W).float()
+        coord_y_map = patch_coords[:, 1].view(batch_size, 1, 1, 1).expand(-1, -1, H, W).float()
+
+        # サイズマップ (Batch_size, 1, H, W)
+        size_map = patch_size.view(batch_size, 1, 1, 1).expand(-1, -1, H, W).float()
+        
+        # 結合する前に、値の範囲を他の画像（通常 -1 から 1）に合わせる正規化を行うことを強く推奨します。
+        # 例えば、max_dim = 256 のような値で:
+        # coord_x_map = (coord_x_map / (max_dim / 2) - 1).float()
+        # coord_y_map = (coord_y_map / (max_dim / 2) - 1).float()
+        # size_map = (size_map / (max_dim / 2) - 1).float() # パッチサイズも同様に正規化
+
+        extended_input = torch.cat([input_image, coord_x_map, coord_y_map, size_map], dim=1)
+
+        # ----------------------------------------------------
+        # 2. ジェネレーターのフォワードパス (ダウンサンプリングまで)
+        # ----------------------------------------------------
+        x = self.initial_conv_block(extended_input)
+
+        # ダウンサンプリング層を個別に適用
+        downsampled_features = None # ダウンサンプリングの最後の層の出力を保持
+        for i, down_layer in enumerate(self.downsample_layers):
+            x = down_layer(x)
+            if i == len(self.downsample_layers) - 1: # ダウンサンプリングの最後の層
+                downsampled_features = x 
+
+        # ----------------------------------------------------
+        # 3. ResNetブロックの適用
+        # ----------------------------------------------------
+        for res_block in self.resnet_blocks:
+            x = res_block(x)
+        
+        # ----------------------------------------------------
+        # 4. 骨有無予測器の実行
+        # ----------------------------------------------------
+        # bone_predictor に渡す downsampled_features は、ダウンサンプリングの最後の出力
+        # これにより、各スライスに対応する bone_prediction が得られる
+        bone_prediction = self.bone_predictor(downsampled_features)
+        # bone_prediction は (Batch_size, input_nc) の形状になるはずです。
+        # ただし、downsampled_features は Batch_size, ngf*mult, H', W' となっており、
+        # bone_predictor はこのチャネル数 (ngf*mult) から input_nc (5) に変換しています。
+
+        # ----------------------------------------------------
+        # 5. アップサンプリング層と最終出力層
+        # ----------------------------------------------------
+        for up_layer in self.upsample_layers:
+            x = up_layer(x)
+        
+        generated_image = self.final_output_layer(x)
+        generated_image = self.output_activation(generated_image)
+
+        return generated_image, bone_prediction
 
 
 class UnetGenerator(nn.Module):
