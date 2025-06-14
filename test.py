@@ -81,7 +81,7 @@ if __name__ == '__main__':
         if i % 5 == 0:  # save images to an HTML file
             print('processing (%04d)-th image... %s' % (i, img_path))
         # 追加
-        if opt.dataset_mode == "dicom":
+        if opt.dataset_mode == "dicom" or opt.dataset_mode == "dicom_extention":
             save_dicom_images(web_dir, visuals, img_path, opt)
         else:
             save_nifti_images(web_dir, visuals, img_path, opt, affine) # save as .nii.gz

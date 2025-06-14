@@ -403,7 +403,12 @@ class DicomExtentionDataset(BaseDataset):
                 A = torch.cat(A, dim=0)  # [5, 1, 128, 128]
                 B = [transform(img, do_flip_lr, do_flip_ud, rotation, 1) for img in B]
                 B = torch.cat(B, dim=0)  # [5, 1, H, W]
-                
+            
+            if self.opt.phase == "train" and self.make_patch:
+                image_size = self.opt.crop_patch_size
+            else:
+                image_size = self.opt.load_size
+
             return {
                 'A': A,
                 'B': B,
@@ -411,7 +416,7 @@ class DicomExtentionDataset(BaseDataset):
                 'B_paths': B_slice_paths,
                 'A_patch_coords': [crop_start_width, crop_start_height],
                 'B_patch_coords': [crop_start_width, crop_start_height], # Assuming same patch for B
-                'patch_size': self.opt.crop_patch_size,
+                'patch_size': image_size,
                 'A_bone_presence': A_bone_presence_list, # List of bone presence for each slice
                 'B_bone_presence': B_bone_presence_list  # List of bone presence for each slice
             }
