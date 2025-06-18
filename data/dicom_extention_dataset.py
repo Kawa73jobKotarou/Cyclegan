@@ -258,22 +258,11 @@ class DicomExtentionDataset(BaseDataset):
                 A = transform(A, do_flip_lr, do_flip_ud, rotation, self.input_nc_G)
                 B = transform(B, do_flip_lr, do_flip_ud, rotation, self.input_nc_G)
 
-            # Determine bone presence
-            # Assuming mask paths follow a similar structure to A_path/B_path
-            # You'll need to adjust the mask_path generation based on your actual file structure
-            bone_A_presence = 0 # Default to 2 (no bone)
-            bone_B_presence = 0 # Default to 2 (no bone)
-
-            # Example: Constructing mask path. Adjust this according to your dataset.
-            # Assuming mask files are in a directory like 'masks/Bone/' and have the same name as the original images.
-            # You might need to parse A_path/B_path to get the base filename.
             try:
                 # For A (non-CT)
                 A_filename = A_path.split('/')[-1]
                 A_mask_path = A_path.replace(A_filename, f'masks/Bone/{A_filename.split(".")[0]}.png') # Adjust suffix if not .png
                 A_mask = cv2.imread(A_mask_path, cv2.IMREAD_GRAYSCALE) # Assuming bone masks are images
-                if A_mask is not None and np.any(A_mask == 1): # Check if any pixel is 1
-                    bone_A_presence = 1
             except Exception as e:
                 print(f"Could not load or process A bone mask for {A_path}: {e}")
 
@@ -282,8 +271,6 @@ class DicomExtentionDataset(BaseDataset):
                 B_filename = B_path.split('/')[-1]
                 B_mask_path = B_path.replace(B_filename, f'masks/Bone/{B_filename.split(".")[0]}.png') # Adjust suffix if not .png
                 B_mask = cv2.imread(B_mask_path, cv2.IMREAD_GRAYSCALE) # Assuming bone masks are images
-                if B_mask is not None and np.any(B_mask == 1): # Check if any pixel is 1
-                    bone_B_presence = 1
             except Exception as e:
                 print(f"Could not load or process B bone mask for {B_path}: {e}")
 
@@ -292,11 +279,8 @@ class DicomExtentionDataset(BaseDataset):
                 'B': B,
                 'A_paths': A_path,
                 'B_paths': B_path,
-                'A_patch_coords': [crop_start_width, crop_start_height],
-                'B_patch_coords': [crop_start_width, crop_start_height], # Assuming same patch for B
-                'patch_size': self.opt.crop_patch_size,
-                'A_bone_presence': bone_A_presence,
-                'B_bone_presence': bone_B_presence
+                'A_bone': A_mask,
+                'B_bone': B_mask
             }
         else:
             # A_paths と B_paths のインデックス計算
@@ -346,24 +330,20 @@ class DicomExtentionDataset(BaseDataset):
 
             # A スライスを読み込んでテンソル化
             A_slices = []
-            A_bone_presence_list = [] # To store bone presence for each A slice
+            A_bone_list = [] # To store bone presence for each A slice
             for path in A_slice_paths:
                 A_dcm = pydicom.dcmread(path)
                 A_img = self.preprocess(A_dcm.pixel_array, crop_start_width, crop_start_height, self.opt, is_CT=False)
                 A_slices.append(A_img)
-                # Determine bone presence for each A slice
-                bone_A_presence = 0 
                 if self.opt.phase == "train":
                     A_filename = path.split('/')[-1]
                     A_mask_path = path.replace(A_filename, f'masks/Bone/{A_filename.split(".")[0]}.png')
                     A_mask = cv2.imread(A_mask_path, cv2.IMREAD_GRAYSCALE)
                     A_mask = self.preprocess(A_mask, crop_start_width, crop_start_height, self.opt, is_CT=False)
-                    if A_mask.max() == 1.0: # 画素値1が骨を示す場合
-                        bone_A_presence = 1 # 骨あり
-
-                A_bone_presence_list.append(bone_A_presence)
+                A_bone_list.append(A_mask)
 
             A = torch.cat(A_slices, dim=0)  # (5, 256, 256)
+            A_bone_list = torch.cat(A_bone_list, dim=0)  # (5, 256, 256)
 
             # B スライスを読み込んでテンソル化
             if self.opt.phase == "train":
@@ -375,7 +355,7 @@ class DicomExtentionDataset(BaseDataset):
             B_slice_paths = get_slice_paths(self.B_paths, index_B, int((self.input_nc_G-1)/2))
             # 各Bスライスを読み込んでテンソル化
             B_slices = []
-            B_bone_presence_list = [] # To store bone presence for each B slice
+            B_bone_list = [] # To store bone presence for each B slice
             for path in B_slice_paths:
                 match = re.search(pattern, path)
                 extracted = match.group(1)
@@ -383,17 +363,15 @@ class DicomExtentionDataset(BaseDataset):
                 B_img = self.preprocess(B_dcm.pixel_array, crop_start_width, crop_start_height, self.opt, is_CT=True, min_max=self.min_max_dict[extracted])
                 B_slices.append(B_img)
                 # Determine bone presence for each B slice
-                bone_B_presence = 0 
                 if self.opt.phase == "train":
                     B_filename = path.split('/')[-1]
                     B_mask_path = path.replace(B_filename, f'masks/Bone/{B_filename.split(".")[0]}.png')
                     B_mask = cv2.imread(B_mask_path, cv2.IMREAD_GRAYSCALE)
                     B_mask = self.preprocess(B_mask, crop_start_width, crop_start_height, self.opt, is_CT=False)
-                    if B_mask.max() == 1.0: # 画素値1が骨を示す場合
-                        bone_B_presence = 1
-                B_bone_presence_list.append(bone_B_presence)
+                B_bone_list.append(B_mask)
 
             B = torch.cat(B_slices, dim=0)  # (5, 256, 256) など
+            B_bone_list = torch.cat(B_bone_list, dim=0)  # (5, 256, 256) など
 
             if self.opt.phase == "train":
                 do_flip_lr = random.random() > 0.5
@@ -401,24 +379,20 @@ class DicomExtentionDataset(BaseDataset):
                 rotation = random.choice([0, 90, 180, 270])
                 A = [transform(img, do_flip_lr, do_flip_ud, rotation, 1) for img in A]
                 A = torch.cat(A, dim=0)  # [5, 1, 128, 128]
+                A_bone_list = [transform(img, do_flip_lr, do_flip_ud, rotation, 1) for img in A_bone_list]
+                A_bone_list = torch.cat(A_bone_list, dim=0)  # [5, 1, 128, 128]
                 B = [transform(img, do_flip_lr, do_flip_ud, rotation, 1) for img in B]
                 B = torch.cat(B, dim=0)  # [5, 1, H, W]
-            
-            if self.opt.phase == "train" and self.make_patch:
-                image_size = self.opt.crop_patch_size
-            else:
-                image_size = self.opt.load_size
+                B_bone_list = [transform(img, do_flip_lr, do_flip_ud, rotation, 1) for img in B_bone_list]
+                B_bone_list = torch.cat(B_bone_list, dim=0)  # [5, 1, H, W]
 
             return {
                 'A': A,
                 'B': B,
                 'A_paths': A_slice_paths,
                 'B_paths': B_slice_paths,
-                'A_patch_coords': [crop_start_width, crop_start_height],
-                'B_patch_coords': [crop_start_width, crop_start_height], # Assuming same patch for B
-                'patch_size': image_size,
-                'A_bone_presence': A_bone_presence_list, # List of bone presence for each slice
-                'B_bone_presence': B_bone_presence_list  # List of bone presence for each slice
+                'A_bone': A_bone_list, # List of bone presence for each slice
+                'B_bone': B_bone_list  # List of bone presence for each slice
             }
 
 

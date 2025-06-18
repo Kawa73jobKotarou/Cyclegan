@@ -6,6 +6,8 @@ from torch.optim import lr_scheduler
 import torchvision.models as models
 import torch.nn.functional as F
 import numpy as np
+import matplotlib.pyplot as plt
+
 
 
 ###############################################################################
@@ -475,13 +477,10 @@ class ResnetExtentionGenerator(nn.Module):
         # 1. 初期入力層 (座標、サイズ情報を結合するために input_nc を調整)
         # ----------------------------------------------------
         # 今回は5枚重ねの画像が入力されるので、input_nc は5（またはそれ以上）になるはずです。
-        # 座標情報（x,yの2チャネル）とサイズ情報（1チャネル）を結合するので、
-        # 最初の Conv2d の入力チャネル数は input_nc + 3 となります。
-        input_nc_adjusted = input_nc + 3 
 
         self.initial_conv_block = nn.Sequential(
             nn.ReflectionPad2d(3),
-            nn.Conv2d(input_nc_adjusted, ngf, kernel_size=7, padding=0, bias=use_bias),
+            nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
             norm_layer(ngf),
             nn.ReLU(True)
         )
@@ -512,17 +511,26 @@ class ResnetExtentionGenerator(nn.Module):
             self.resnet_blocks.append(resnet_block)
 
         # ----------------------------------------------------
-        # 4. 骨有無予測器 (ダウンサンプリングの最後の層の特徴マップから分岐)
+        # 4. 骨mask予測器 (ダウンサンプリングの最後の層の特徴マップから分岐)
         # ----------------------------------------------------
-        # ダウンサンプリングの最後の層の出力チャネル数は ngf * mult
-        # 各スライスごとに0/1の予測をしたいので、出力チャネル数を入力画像のチャネル数 (input_nc) に合わせます。
-        # ここでは input_nc が入力画像の枚数（今回は5）に対応していると仮定します。
-        self.bone_predictor = nn.Sequential(
-            nn.AdaptiveAvgPool2d(1), # 特徴マップを1x1に集約 (グローバル平均プーリング)
-            nn.Conv2d(ngf * mult, input_nc, kernel_size=1), # 出力チャネル数を input_nc (5) に設定
-            nn.Flatten(), # (Batch, input_nc, 1, 1) -> (Batch, input_nc)
-            nn.Sigmoid() # 0-1の確率を出力
+        self.bone_predictor = nn.ModuleList()
+        for i in range(n_downsampling):
+            mult = 2 ** (n_downsampling - i)
+            bone_layer = nn.Sequential(
+                nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                   kernel_size=3, stride=2,
+                                   padding=1, output_padding=1,
+                                   bias=use_bias),
+                norm_layer(int(ngf * mult / 2)),
+                nn.ReLU(True)
+            )
+            self.bone_predictor.append(bone_layer)
+
+        self.final_bone_layer = nn.Sequential(
+            nn.ReflectionPad2d(3),
+            nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)
         )
+        self.bone_activation = nn.Sigmoid()
 
         # ----------------------------------------------------
         # 5. アップサンプリング層
@@ -554,7 +562,7 @@ class ResnetExtentionGenerator(nn.Module):
         else:
             self.output_activation = nn.Tanh()
 
-    def forward(self, input_image, patch_coords, patch_size):
+    def forward(self, input_image):
         """Extended forward function.
 
         Parameters:
@@ -565,37 +573,15 @@ class ResnetExtentionGenerator(nn.Module):
         Returns:
             Tuple[Tensor, Tensor]: (生成された画像, 各スライスの骨有無の予測確率配列)
         """
-        batch_size, num_slices_input, H, W = input_image.shape
-
-        # ----------------------------------------------------
-        # 1. 座標情報とサイズ情報の特徴マップを生成し、入力画像に結合
-        # ----------------------------------------------------
-        # 座標マップ (Batch_size, 1, H, W)
-        coord_x_map = patch_coords[:, 0].view(batch_size, 1, 1, 1).expand(-1, -1, H, W).float()
-        coord_y_map = patch_coords[:, 1].view(batch_size, 1, 1, 1).expand(-1, -1, H, W).float()
-
-        # サイズマップ (Batch_size, 1, H, W)
-        size_map = patch_size.view(batch_size, 1, 1, 1).expand(-1, -1, H, W).float()
-        
-        # 結合する前に、値の範囲を他の画像（通常 -1 から 1）に合わせる正規化を行うことを強く推奨します。
-        # 例えば、max_dim = 256 のような値で:
-        # coord_x_map = (coord_x_map / (max_dim / 2) - 1).float()
-        # coord_y_map = (coord_y_map / (max_dim / 2) - 1).float()
-        # size_map = (size_map / (max_dim / 2) - 1).float() # パッチサイズも同様に正規化
-
-        extended_input = torch.cat([input_image, coord_x_map, coord_y_map, size_map], dim=1)
 
         # ----------------------------------------------------
         # 2. ジェネレーターのフォワードパス (ダウンサンプリングまで)
         # ----------------------------------------------------
-        x = self.initial_conv_block(extended_input)
+        x = self.initial_conv_block(input_image)
 
         # ダウンサンプリング層を個別に適用
-        downsampled_features = None # ダウンサンプリングの最後の層の出力を保持
         for i, down_layer in enumerate(self.downsample_layers):
             x = down_layer(x)
-            if i == len(self.downsample_layers) - 1: # ダウンサンプリングの最後の層
-                downsampled_features = x 
 
         # ----------------------------------------------------
         # 3. ResNetブロックの適用
@@ -604,14 +590,15 @@ class ResnetExtentionGenerator(nn.Module):
             x = res_block(x)
         
         # ----------------------------------------------------
-        # 4. 骨有無予測器の実行
+        # 4. 骨有無mask器の実行
         # ----------------------------------------------------
-        # bone_predictor に渡す downsampled_features は、ダウンサンプリングの最後の出力
-        # これにより、各スライスに対応する bone_prediction が得られる
-        bone_prediction = self.bone_predictor(downsampled_features)
-        # bone_prediction は (Batch_size, input_nc) の形状になるはずです。
-        # ただし、downsampled_features は Batch_size, ngf*mult, H', W' となっており、
-        # bone_predictor はこのチャネル数 (ngf*mult) から input_nc (5) に変換しています。
+        bone_prediction = x
+
+        for bone_layer in self.bone_predictor:
+            bone_prediction = bone_layer(bone_prediction)
+        bone_mask = self.final_bone_layer(bone_prediction)
+        bone_mask = self.bone_activation(bone_mask)
+        bone_mask= bone_mask * 2 - 1              # in [-1, 1]
 
         # ----------------------------------------------------
         # 5. アップサンプリング層と最終出力層
@@ -622,7 +609,7 @@ class ResnetExtentionGenerator(nn.Module):
         generated_image = self.final_output_layer(x)
         generated_image = self.output_activation(generated_image)
 
-        return generated_image, bone_prediction
+        return generated_image, bone_mask
 
 
 class UnetGenerator(nn.Module):

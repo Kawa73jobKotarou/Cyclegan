@@ -179,7 +179,7 @@ class Visualizer():
         print('Command: %s' % cmd)
         Popen(cmd, shell=True, stdout=PIPE, stderr=PIPE)
 
-    def display_current_results(self, visuals, epoch, save_result, mr_bone_flag = 0, ct_bone_flag = 0):
+    def display_current_results(self, visuals, epoch, save_result):
         """Display current results on visdom; save current results to an HTML file.
 
         Parameters:
@@ -272,12 +272,7 @@ class Visualizer():
                     image_numpy = util.tensor2im(image_numpy)
                     img_path = 'epoch%.3d_%s.png' % (n, label)
                     ims.append(img_path)
-                    if label == "real_A":
-                        txts.append(label + " " +str(mr_bone_flag))
-                    elif label == "real_B":
-                        txts.append(label + " " +str(ct_bone_flag))
-                    else:
-                        txts.append(label)
+                    txts.append(label)
                     links.append(img_path)
                 webpage.add_images(ims, txts, links, width=self.win_size)
             webpage.save()

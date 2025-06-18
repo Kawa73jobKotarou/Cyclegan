@@ -3,7 +3,39 @@ import itertools
 from util.image_pool import ImagePool
 from .base_model import BaseModel
 from . import networks
+import matplotlib.pyplot as plt
+import torchvision.transforms.functional as TF
 
+def show_tensor_images(real_A, real_B, A_bone, B_bone, titles=None):
+    import matplotlib.pyplot as plt
+    import torchvision.transforms.functional as TF
+    import torch
+
+    images = [real_A, real_B, A_bone, B_bone]
+    titles = titles or ["real_A", "real_B", "A_bone", "B_bone"]
+
+    plt.figure(figsize=(12, 4))
+    for i, (img, title) in enumerate(zip(images, titles)):
+        plt.subplot(1, 4, i + 1)
+
+        # リスト形式なら最初の要素を取得
+        if isinstance(img, list):
+            img = img[0]
+        if isinstance(img, torch.Tensor):
+            img_tensor = img.detach().cpu()
+            img_tensor = img_tensor[0][2] # グレースケール対応
+
+            img_pil = TF.to_pil_image(img_tensor)
+            plt.imshow(img_pil, cmap='gray' if img_tensor.ndim == 2 else None)
+            plt.title(title)
+            plt.axis('off')
+        else:
+            plt.text(0.5, 0.5, f"Not a tensor: {type(img)}", fontsize=8)
+            plt.title(f"{title} (Error)")
+            plt.axis('off')
+
+    plt.tight_layout()
+    plt.show()
 
 class CycleSeSimExtentionModel(BaseModel):
     """
@@ -55,7 +87,9 @@ class CycleSeSimExtentionModel(BaseModel):
             parser.add_argument('--lambda_style', type=float, default=0.0, help='weight for style loss')
             parser.add_argument('--use_CTloss', action='store_true', help='use the CT loss')
             parser.add_argument('--lambda_CT', type=float, default=10.0, help='weight for CT loss')
-            parser.add_argument('--lambda_Bone', type=float, default=10.0, help='weight for Bone loss')
+            parser.add_argument('--lambda_Bone_AtoB', type=float, default=50.0, help='weight for Bone loss')
+            parser.add_argument('--lambda_Bone_BtoA', type=float, default=10.0, help='weight for Bone loss')
+
         return parser
 
     def __init__(self, opt):
@@ -68,8 +102,8 @@ class CycleSeSimExtentionModel(BaseModel):
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
         self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B', 'style', 'G_A_s', 'per']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
-        visual_names_A = ['real_A', 'fake_B', 'rec_A']
-        visual_names_B = ['real_B', 'fake_A', 'rec_B']
+        visual_names_A = ['real_A','A_bone', 'fake_B', 'fakeB_bone', 'rec_A']
+        visual_names_B = ['real_B','B_bone', 'fake_A',  'fakeA_bone', 'rec_B']
         if self.isTrain and self.opt.lambda_identity > 0.0:  # if identity loss is used, we also visualize idt_B=G_A(B) ad idt_A=G_A(B)
             visual_names_A.append('idt_B')
             visual_names_B.append('idt_A')
@@ -77,7 +111,8 @@ class CycleSeSimExtentionModel(BaseModel):
         if self.isTrain and self.opt.use_CTloss:
             self.loss_names.append('CT')
 
-        self.loss_names.append('Bone')
+        self.loss_names.append('Bone_AtoB')
+        self.loss_names.append('Bone_BtoA')
 
         self.input_nc = opt.input_nc
 
@@ -124,7 +159,7 @@ class CycleSeSimExtentionModel(BaseModel):
             # realCTとfakeCTでpixelベースのlossを取得
             self.criterionCT = torch.nn.L1Loss()
             # 骨の有無の損失関数
-            self.criterionBone = torch.nn.BCELoss()
+            self.criterionBone = torch.nn.L1Loss()
 
             # define the contrastive loss
             if opt.learned_attn:
@@ -163,6 +198,7 @@ class CycleSeSimExtentionModel(BaseModel):
                     self.optimizer_F.zero_grad()
 
     def set_input(self, input):
+
         """Unpack input data from the dataloader and perform necessary pre-processing steps.
 
         Parameters:
@@ -175,29 +211,16 @@ class CycleSeSimExtentionModel(BaseModel):
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
-        self.patch_coords = torch.stack(input['A_patch_coords'], dim=0).to(self.device).float()
-        # shape が (2, 4) の場合に、(4, 2) に転置する
-        if self.patch_coords.shape[0] == 2 and self.patch_coords.shape[1] == input['A'].shape[0]:
-            self.patch_coords = self.patch_coords.T # .T は転置 (transpose)
-
-        self.patch_size = input['patch_size'].to(self.device).float()
-        if self.patch_size.ndim == 1: # (Batch_size,) の場合
-            self.patch_size = self.patch_size.unsqueeze(1) # (Batch_size, 1) にする
-
-        self.A_bone_presence = torch.stack(input['A_bone_presence'], dim=0).to(self.device).float()
-        if self.A_bone_presence.shape[0] == input['A'].shape[1] and self.A_bone_presence.shape[1] == input['A'].shape[0]:
-            self.A_bone_presence = self.A_bone_presence.T
-            
-        self.B_bone_presence = torch.stack(input['B_bone_presence'], dim=0).to(self.device).float()
-        if self.B_bone_presence.shape[0] == input['B'].shape[1] and self.B_bone_presence.shape[1] == input['B'].shape[0]:
-            self.B_bone_presence = self.B_bone_presence.T
+        self.A_bone = input['A_bone' if AtoB else 'B_bone'].to(self.device)
+        self.B_bone = input['B_bone' if AtoB else 'A_bone'].to(self.device)
+        # show_tensor_images(self.real_A, self.real_B, self.A_bone, self.B_bone)
 
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
-        self.fake_B, self.realA_bone_prediction = self.netG_A(self.real_A, self.patch_coords, self.patch_size)  # G_A(A)
-        self.rec_A, _ = self.netG_B(self.fake_B, self.patch_coords, self.patch_size)   # G_B(G_A(A))
-        self.fake_A, self.realB_bone_prediction = self.netG_B(self.real_B, self.patch_coords, self.patch_size)  # G_B(B)
-        self.rec_B, _ = self.netG_A(self.fake_A, self.patch_coords, self.patch_size)   # G_A(G_B(B))
+        self.fake_B, self.fakeB_bone = self.netG_A(self.real_A)  # G_A(A)
+        self.rec_A, _ = self.netG_B(self.fake_B)   # G_B(G_A(A))
+        self.fake_A, self.fakeA_bone = self.netG_B(self.real_B)  # G_B(B)
+        self.rec_B, _ = self.netG_A(self.fake_A)   # G_A(G_B(B))
 
     def backward_F(self):
         """
@@ -259,15 +282,17 @@ class CycleSeSimExtentionModel(BaseModel):
         # CTのpixelベースの損失
         l_CT = self.opt.lambda_CT
         # Boneの識別の損失
-        l_Bone = self.opt.lambda_Bone
+        l_Bone_AtoB = self.opt.lambda_Bone_AtoB
+        l_Bone_BtoA = self.opt.lambda_Bone_BtoA
+
 
         # Identity loss
         if lambda_idt > 0:
             # G_A should be identity if real_B is fed: ||G_A(B) - B||
-            self.idt_A, _ = self.netG_A(self.real_B, self.patch_coords, self.patch_size)
+            self.idt_A, _ = self.netG_A(self.real_B)
             self.loss_idt_A = self.criterionIdt(self.idt_A, self.real_B) * lambda_B * lambda_idt
             # G_B should be identity if real_A is fed: ||G_B(A) - A||
-            self.idt_B, _ = self.netG_B(self.real_A, self.patch_coords, self.patch_size)
+            self.idt_B, _ = self.netG_B(self.real_A)
             self.loss_idt_B = self.criterionIdt(self.idt_B, self.real_A) * lambda_A * lambda_idt
         else:
             self.loss_idt_A = 0
@@ -298,10 +323,11 @@ class CycleSeSimExtentionModel(BaseModel):
         # CTのpixelベースの損失
         self.loss_CT = self.criterionCT(self.fake_B,self.real_B) * l_CT if self.opt.use_CTloss else 0
         # Boneの識別の損失
-        self.loss_Bone = (self.criterionBone(self.realA_bone_prediction, self.A_bone_presence) + self.criterionBone(self.realB_bone_prediction, self.B_bone_presence)) * l_Bone 
+        self.loss_Bone_AtoB = self.criterionBone(self.fakeB_bone,self.A_bone) * l_Bone_AtoB
+        self.loss_Bone_BtoA = self.criterionBone(self.fakeA_bone,self.B_bone) * l_Bone_BtoA
 
         # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT + self.loss_Bone
+        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT + self.loss_Bone_AtoB + self.loss_Bone_BtoA
         self.loss_G.backward()
 
     def optimize_parameters(self):
