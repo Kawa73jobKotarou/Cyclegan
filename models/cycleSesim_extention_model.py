@@ -210,7 +210,7 @@ class CycleSeSimExtentionModel(BaseModel):
         self.real_A = input['A' if AtoB else 'B'].to(self.device)
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
-
+        
         self.A_bone = input['A_bone' if AtoB else 'B_bone'].to(self.device)
         self.B_bone = input['B_bone' if AtoB else 'A_bone'].to(self.device)
         # show_tensor_images(self.real_A, self.real_B, self.A_bone, self.B_bone)

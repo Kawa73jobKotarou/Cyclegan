@@ -340,7 +340,12 @@ class DicomExtentionDataset(BaseDataset):
                     A_mask_path = path.replace(A_filename, f'masks/Bone/{A_filename.split(".")[0]}.png')
                     A_mask = cv2.imread(A_mask_path, cv2.IMREAD_GRAYSCALE)
                     A_mask = self.preprocess(A_mask, crop_start_width, crop_start_height, self.opt, is_CT=False)
-                A_bone_list.append(A_mask)
+                    A_bone_list.append(A_mask)
+                else:
+                    A_mask = np.zeros(A_img.shape, dtype=np.uint8)  # A_img と同じサイズ (256, 256)
+                    A_mask = torch.from_numpy(A_mask).float()  # (256, 256)
+                    A_bone_list.append(A_mask)
+
 
             A = torch.cat(A_slices, dim=0)  # (5, 256, 256)
             A_bone_list = torch.cat(A_bone_list, dim=0)  # (5, 256, 256)
@@ -368,7 +373,12 @@ class DicomExtentionDataset(BaseDataset):
                     B_mask_path = path.replace(B_filename, f'masks/Bone/{B_filename.split(".")[0]}.png')
                     B_mask = cv2.imread(B_mask_path, cv2.IMREAD_GRAYSCALE)
                     B_mask = self.preprocess(B_mask, crop_start_width, crop_start_height, self.opt, is_CT=False)
-                B_bone_list.append(B_mask)
+                    B_bone_list.append(B_mask)
+                else:
+                    B_mask = np.zeros(B_img.shape, dtype=np.uint8)  # B_img と同じサイズ
+                    B_mask = torch.from_numpy(B_mask).float()  # (256, 256)
+                    B_bone_list.append(B_mask)
+
 
             B = torch.cat(B_slices, dim=0)  # (5, 256, 256) など
             B_bone_list = torch.cat(B_bone_list, dim=0)  # (5, 256, 256) など
@@ -385,7 +395,6 @@ class DicomExtentionDataset(BaseDataset):
                 B = torch.cat(B, dim=0)  # [5, 1, H, W]
                 B_bone_list = [transform(img, do_flip_lr, do_flip_ud, rotation, 1) for img in B_bone_list]
                 B_bone_list = torch.cat(B_bone_list, dim=0)  # [5, 1, H, W]
-
             return {
                 'A': A,
                 'B': B,
