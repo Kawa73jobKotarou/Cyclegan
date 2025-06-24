@@ -55,6 +55,8 @@ class CycleLSeSimModel(BaseModel):
             parser.add_argument('--lambda_style', type=float, default=0.0, help='weight for style loss')
             parser.add_argument('--use_CTloss', action='store_true', help='use the CT loss')
             parser.add_argument('--lambda_CT', type=float, default=10.0, help='weight for CT loss')
+            parser.add_argument('--use_Boneloss', action='store_true', help='use the CT loss')
+            parser.add_argument('--lambda_Bone', type=float, default=100.0, help='weight for CT loss')
         return parser
 
     def __init__(self, opt):
@@ -75,6 +77,9 @@ class CycleLSeSimModel(BaseModel):
 
         if self.isTrain and self.opt.use_CTloss:
             self.loss_names.append('CT')
+
+        if self.isTrain and self.opt.use_Boneloss:
+            self.loss_names.append('Bone')
 
         self.input_nc = opt.input_nc
 
@@ -169,6 +174,10 @@ class CycleLSeSimModel(BaseModel):
         self.real_A = input['A' if AtoB else 'B'].to(self.device)
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
+
+        if self.dataset_mode == 'dicom_extention':
+            self.A_bone = input['A_bone' if AtoB else 'B_bone'].to(self.device)
+            self.B_bone = input['B_bone' if AtoB else 'A_bone'].to(self.device)
 
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
