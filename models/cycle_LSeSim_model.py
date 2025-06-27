@@ -3,7 +3,28 @@ import itertools
 from util.image_pool import ImagePool
 from .base_model import BaseModel
 from . import networks
+import torch.nn as nn
+from scipy.ndimage import binary_fill_holes
+import numpy as np
+import pdb
 
+class DiceLoss(nn.Module):
+    def __init__(self, eps=1e-6):
+        super(DiceLoss, self).__init__()
+        self.eps = eps
+
+    def forward(self, pred, target):
+        # pred: (N, 1, H, W) または (N, H, W)
+        # target: 同じshape, 値は0または1
+        pred = (pred + 1) / 2
+        target = (target + 1) / 2
+        pred = pred.contiguous().view(pred.shape[0], -1)
+        target = target.contiguous().view(target.shape[0], -1)
+        
+        intersection = (pred * target).sum(dim=1)
+        dice = (2. * intersection + self.eps) / (pred.sum(dim=1) + target.sum(dim=1) + self.eps)
+        loss = 1 - dice  # Dice Loss
+        return loss.mean()
 
 class CycleLSeSimModel(BaseModel):
     """
@@ -55,8 +76,8 @@ class CycleLSeSimModel(BaseModel):
             parser.add_argument('--lambda_style', type=float, default=0.0, help='weight for style loss')
             parser.add_argument('--use_CTloss', action='store_true', help='use the CT loss')
             parser.add_argument('--lambda_CT', type=float, default=10.0, help='weight for CT loss')
-            parser.add_argument('--use_Boneloss', action='store_true', help='use the CT loss')
-            parser.add_argument('--lambda_Bone', type=float, default=100.0, help='weight for CT loss')
+            parser.add_argument('--use_Boneloss', action='store_true', help='use the Bone loss')
+            parser.add_argument('--lambda_Bone', type=float, default=100.0, help='weight for Bone loss')
         return parser
 
     def __init__(self, opt):
@@ -69,7 +90,10 @@ class CycleLSeSimModel(BaseModel):
         # specify the training losses you want to print out. The training/test scripts will call <BaseModel.get_current_losses>
         self.loss_names = ['D_A', 'G_A', 'cycle_A', 'idt_A', 'D_B', 'G_B', 'cycle_B', 'idt_B', 'style', 'G_A_s', 'per']
         # specify the images you want to save/display. The training/test scripts will call <BaseModel.get_current_visuals>
-        visual_names_A = ['real_A', 'fake_B', 'rec_A']
+        if self.opt.dataset_mode == 'dicom_extention':
+            visual_names_A = ['real_A', 'A_bone', 'fake_B', 'fakeB_bone', 'rec_A']
+        else:
+            visual_names_A = ['real_A', 'fake_B', 'rec_A']
         visual_names_B = ['real_B', 'fake_A', 'rec_B']
         if self.isTrain and self.opt.lambda_identity > 0.0:  # if identity loss is used, we also visualize idt_B=G_A(B) ad idt_A=G_A(B)
             visual_names_A.append('idt_B')
@@ -125,6 +149,8 @@ class CycleLSeSimModel(BaseModel):
             self.normalization = networks.Normalization(self.device)
             # realCTとfakeCTでpixelベースのlossを取得
             self.criterionCT = torch.nn.L1Loss()
+            # 骨のDiceの損失関数
+            self.criterionBone = DiceLoss()
 
             # define the contrastive loss
             if opt.learned_attn:
@@ -175,9 +201,8 @@ class CycleLSeSimModel(BaseModel):
         self.real_B = input['B' if AtoB else 'A'].to(self.device)
         self.image_paths = input['A_paths' if AtoB else 'B_paths']
 
-        if self.dataset_mode == 'dicom_extention':
+        if self.opt.dataset_mode == 'dicom_extention':
             self.A_bone = input['A_bone' if AtoB else 'B_bone'].to(self.device)
-            self.B_bone = input['B_bone' if AtoB else 'A_bone'].to(self.device)
 
     def forward(self):
         """Run forward pass; called by both functions <optimize_parameters> and <test>."""
@@ -185,6 +210,27 @@ class CycleLSeSimModel(BaseModel):
         self.rec_A = self.netG_B(self.fake_B)   # G_B(G_A(A))
         self.fake_A = self.netG_B(self.real_B)  # G_B(B)
         self.rec_B = self.netG_A(self.fake_A)   # G_A(G_B(B))
+        if self.opt.dataset_mode == 'dicom_extention':
+            def denormalize(tensor, threshold_lower, threshold_upper, eps=1e-6):
+                # [-1, 1] → [threshold_lower, threshold_upper]
+                return ((tensor + 1) / 2) * (threshold_upper - threshold_lower + eps) + threshold_lower
+
+            # まず正規化を元に戻す
+            fake_B_denorm = denormalize(self.fake_B, -1000, 1300)
+            # 200以上を1、それ以外を0にするマスクを作成
+            mask = (fake_B_denorm >= 200).float()  # shape: [B, C, H, W], 値は 0. or 1.
+            # CPUに移動し、NumPyに変換して穴埋め処理
+            mask_np = mask.cpu().numpy()  # → shape: [B, C, H, W]
+            filled_mask_np = np.zeros_like(mask_np)
+
+            for b in range(mask_np.shape[0]):
+                for c in range(mask_np.shape[1]):
+                    filled_mask_np[b, c] = binary_fill_holes(mask_np[b, c]).astype(np.float32)
+
+            # filled_mask をテンソルに戻す（必要ならGPUへも）
+            self.fakeB_bone = torch.from_numpy(filled_mask_np).to(mask.device)  # shape: [B, C, H, W]
+            # 値を 0 or 1 → -1 or 1 に変換
+            self.fakeB_bone = self.fakeB_bone * 2 - 1
 
     def backward_F(self):
         """
@@ -245,6 +291,8 @@ class CycleLSeSimModel(BaseModel):
         l_sptial = self.opt.lambda_spatial
         # CTのpixelベースの損失
         l_CT = self.opt.lambda_CT
+        # BoneのDiceの損失
+        l_Bone = self.opt.lambda_Bone
 
         # Identity loss
         if lambda_idt > 0:
@@ -280,9 +328,11 @@ class CycleLSeSimModel(BaseModel):
         self.loss_G_A_s = self.Spatial_Loss(self.netPre, norm_real_A, norm_fake_B, None) * l_sptial if l_sptial > 0 else 0
         # CTのpixelベースの損失
         self.loss_CT = self.criterionCT(self.fake_B,self.real_B) * l_CT if self.opt.use_CTloss else 0
+        # BoneのDiceの損失
+        self.loss_Bone = self.criterionBone(self.A_bone,self.fakeB_bone) * l_Bone if self.opt.use_Boneloss else 0
 
         # combined loss and calculate gradients
-        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT
+        self.loss_G = self.loss_G_A + self.loss_G_B + self.loss_cycle_A + self.loss_cycle_B + self.loss_idt_A + self.loss_idt_B + self.loss_per + self.loss_style + self.loss_G_A_s + self.loss_CT + self.loss_Bone
         self.loss_G.backward()
 
     def optimize_parameters(self):
