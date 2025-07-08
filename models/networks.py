@@ -122,7 +122,7 @@ def init_net(net, init_type='normal', init_gain=0.02, gpu_ids=[]):
     return net
 
 
-def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, init_type='normal', init_gain=0.02, gpu_ids=[]):
+def define_G(opt, input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, init_type='normal', init_gain=0.02, gpu_ids=[]):
     """Create a generator
 
     Parameters:
@@ -164,6 +164,8 @@ def define_G(input_nc, output_nc, ngf, netG, norm='batch', use_dropout=False, in
        net = ResnetGenerator(input_nc, output_nc, ngf=64, norm_layer=nn.InstanceNorm2d, use_dropout=False, n_blocks=9, padding_type='reflect', activation = "sigmoid")
     elif netG == 'resnet_extention':
        net = ResnetExtentionGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
+    elif netG == 'swin_unet':
+       net = SwinUnet(opt, opt.load_size, opt.output_nc)
     else:
         raise NotImplementedError('Generator model name [%s] is not recognized' % netG)
     return init_net(net, init_type, init_gain, gpu_ids)
@@ -1167,13 +1169,6 @@ class VGG16(nn.Module):
     
 import copy
 import logging
-import math
-
-from os.path import join as pjoin
-
-from torch.nn import CrossEntropyLoss, Dropout, Softmax, Linear, Conv2d, LayerNorm
-from torch.nn.modules.utils import _pair
-from scipy import ndimage
 from .swin_transformer_unet_skip_expand_decoder_sys import SwinTransformerSys
 
 logger = logging.getLogger(__name__)
@@ -1185,22 +1180,22 @@ class SwinUnet(nn.Module):
         self.zero_head = zero_head
         self.config = config
 
-        self.swin_unet = SwinTransformerSys(img_size=config.DATA.IMG_SIZE,
-                                patch_size=config.MODEL.SWIN.PATCH_SIZE,
-                                in_chans=config.MODEL.SWIN.IN_CHANS,
+        self.swin_unet = SwinTransformerSys(img_size=config.load_size,
+                                patch_size=4,
+                                in_chans=config.input_nc,
                                 num_classes=self.num_classes,
-                                embed_dim=config.MODEL.SWIN.EMBED_DIM,
-                                depths=config.MODEL.SWIN.DEPTHS,
-                                num_heads=config.MODEL.SWIN.NUM_HEADS,
-                                window_size=config.MODEL.SWIN.WINDOW_SIZE,
-                                mlp_ratio=config.MODEL.SWIN.MLP_RATIO,
-                                qkv_bias=config.MODEL.SWIN.QKV_BIAS,
-                                qk_scale=config.MODEL.SWIN.QK_SCALE,
-                                drop_rate=config.MODEL.DROP_RATE,
-                                drop_path_rate=config.MODEL.DROP_PATH_RATE,
-                                ape=config.MODEL.SWIN.APE,
-                                patch_norm=config.MODEL.SWIN.PATCH_NORM,
-                                use_checkpoint=config.TRAIN.USE_CHECKPOINT)
+                                embed_dim=96,
+                                depths=[2,2,6,2],
+                                num_heads=[3,6,12,24],
+                                window_size=8,
+                                mlp_ratio=4,
+                                qkv_bias=True,
+                                qk_scale=None,
+                                drop_rate=0.0,
+                                drop_path_rate=0.1,
+                                ape=False,
+                                patch_norm=True,
+                                use_checkpoint=False)
 
     def forward(self, x):
         if x.size()[1] == 1:
