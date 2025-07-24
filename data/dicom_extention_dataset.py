@@ -172,7 +172,7 @@ class DicomExtentionDataset(BaseDataset):
             img = (img - min_max["min"]) / (min_max["max"] - min_max["min"] + eps) * 2.0 - 1
         else:
             # normalize image to [-1, 1]
-            img = (img - np.min(img)) / (np.max(img) - np.min(img) + eps) * 2.0 - 1
+            img = (img + 1000) / (1000 + 1000 + eps) * 2.0 - 1
         # transform ndarray image to torch.tensor and (256, 256) to (1, 256, 256)
         img = torch.from_numpy(img).unsqueeze(0).float()
 
