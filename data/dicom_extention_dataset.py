@@ -148,7 +148,7 @@ class DicomExtentionDataset(BaseDataset):
 
         return out
 
-    def preprocess(self, img, crop_start_width, crop_start_height, opt, is_CT=False, min_max = None):
+    def preprocess(self, img, crop_start_width, crop_start_height, opt, is_CT=False, min_max = None, is_MASK = False):
         # resize the image to (256, 256). if phase is train, resize the image to (286, 286) and crop randomly to (256, 256)
         if opt.phase == 'train':
             if self.make_patch:
@@ -168,11 +168,14 @@ class DicomExtentionDataset(BaseDataset):
             img = np.clip(img, self.threshold_lower, self.threshold_upper) # eliminate outlier
 
         eps = 10 ** -6 # avoid zero division
-        if is_CT:
-            img = (img - min_max["min"]) / (min_max["max"] - min_max["min"] + eps) * 2.0 - 1
+        if is_MASK:
+            img = (img - np.min(img)) / (np.max(img) - np.min(img) + eps) * 2.0 - 1
         else:
-            # normalize image to [-1, 1]
-            img = (img + 1000) / (1000 + 1000 + eps) * 2.0 - 1
+            if is_CT:
+                img = (img - min_max["min"]) / (min_max["max"] - min_max["min"] + eps) * 2.0 - 1
+            else:
+                # normalize image to [-1, 1]
+                img = (img + 1000) / (1000 + 1000 + eps) * 2.0 - 1
         # transform ndarray image to torch.tensor and (256, 256) to (1, 256, 256)
         img = torch.from_numpy(img).unsqueeze(0).float()
 
@@ -339,7 +342,7 @@ class DicomExtentionDataset(BaseDataset):
                     A_filename = path.split('/')[-1]
                     A_mask_path = path.replace(A_filename, f'masks/Bone/{A_filename.split(".")[0]}.png')
                     A_mask = cv2.imread(A_mask_path, cv2.IMREAD_GRAYSCALE)
-                    A_mask = self.preprocess(A_mask, crop_start_width, crop_start_height, self.opt, is_CT=False)
+                    A_mask = self.preprocess(A_mask, crop_start_width, crop_start_height, self.opt, is_CT=False, is_MASK = True)
                     A_bone_list.append(A_mask)
                 else:
                     A_mask = np.zeros(A_img.shape, dtype=np.uint8)  # A_img と同じサイズ (256, 256)
@@ -372,7 +375,7 @@ class DicomExtentionDataset(BaseDataset):
                     B_filename = path.split('/')[-1]
                     B_mask_path = path.replace(B_filename, f'masks/Bone/{B_filename.split(".")[0]}.png')
                     B_mask = cv2.imread(B_mask_path, cv2.IMREAD_GRAYSCALE)
-                    B_mask = self.preprocess(B_mask, crop_start_width, crop_start_height, self.opt, is_CT=False)
+                    B_mask = self.preprocess(B_mask, crop_start_width, crop_start_height, self.opt, is_CT=False, is_MASK = True)
                     B_bone_list.append(B_mask)
                 else:
                     B_mask = np.zeros(B_img.shape, dtype=np.uint8)  # B_img と同じサイズ

@@ -30,8 +30,14 @@ class Pix2PixModel(BaseModel):
         """
         # changing the default values to match the pix2pix paper (https://phillipi.github.io/pix2pix/)
         parser.set_defaults(norm='batch', netG='unet_256', dataset_mode='aligned')
+        # if is_train:
+        #     parser.set_defaults(pool_size=0, gan_mode='vanilla')
+        #     parser.add_argument('--lambda_L1', type=float, default=100.0, help='weight for L1 loss')
+
+
+        # Pix2PixModel クラス内の modify_commandline_options メソッドに追加/変更
         if is_train:
-            parser.set_defaults(pool_size=0, gan_mode='vanilla')
+            parser.set_defaults(pool_size=0, gan_mode='vanilla', lr=0.0002, beta1=0.5) # lrとbeta1のデフォルト値を設定
             parser.add_argument('--lambda_L1', type=float, default=100.0, help='weight for L1 loss')
 
         return parser
@@ -53,7 +59,7 @@ class Pix2PixModel(BaseModel):
         else:  # during test time, only load G
             self.model_names = ['G']
         # define networks (both generator and discriminator)
-        self.netG = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
+        self.netG = networks.define_G(opt, opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
                                       not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:  # define a discriminator; conditional GANs need to take both input and output images; Therefore, #channels for D is input_nc + output_nc
