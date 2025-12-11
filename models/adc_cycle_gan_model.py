@@ -66,13 +66,10 @@ class ADCCycleGANModel(BaseModel):
         # -------------------------------------------------------------------
         # ここで networks.define_G を呼び出す際、前回の変更により
         # 'resnet_9blocks' を指定すると CBAM 付きの ResNet が生成されます。
-        
         # Generator A: MRI -> ADC
-        self.netG_A = networks.define_G(opt.input_nc, opt.output_nc, opt.ngf, opt.netG, opt.norm,
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+        self.netG_A = networks.define_G(opt,opt.input_nc, opt.output_nc, opt.ngf, 'resnet_9blocks_cbam', opt.norm, not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
         # Generator B: ADC -> MRI
-        self.netG_B = networks.define_G(opt.output_nc, opt.input_nc, opt.ngf, opt.netG, opt.norm,
-                                        not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
+        self.netG_B = networks.define_G(opt,opt.output_nc, opt.input_nc, opt.ngf, 'resnet_9blocks_cbam', opt.norm, not opt.no_dropout, opt.init_type, opt.init_gain, self.gpu_ids)
 
         if self.isTrain:
             # Discriminator A & B (PatchGAN)

@@ -158,6 +158,12 @@ def define_G(opt, input_nc, output_nc, ngf, netG, norm='batch', use_dropout=Fals
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
     elif netG == 'resnet_6blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
+    # --- CBAM Generator の追加 ---
+    elif netG == 'resnet_9blocks_cbam':
+        net = ResnetGeneratorCBAM(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
+    elif netG == 'resnet_6blocks_cbam':
+        net = ResnetGeneratorCBAM(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
+    # ---
     elif netG == 'unet_128':
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'unet_256':
@@ -449,7 +455,132 @@ class ResnetBlock(nn.Module):
         out = x + self.conv_block(x)  # add skip connections
         return out
 
-# ResnetBlock の定義は変更しないので、省略します
+# -------------------------------------------------------------------
+# CBAM 関連モジュールの定義
+# -------------------------------------------------------------------
+
+class ChannelAttentionModule(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(ChannelAttentionModule, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.shared_MLP = nn.Sequential(
+            nn.Conv2d(channel, channel // reduction, 1, bias=False),
+            nn.ReLU(),
+            nn.Conv2d(channel // reduction, channel, 1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.shared_MLP(self.avg_pool(x))
+        max_out = self.shared_MLP(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttentionModule(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttentionModule, self).__init__()
+
+        # AvgPoolとMaxPoolをチャネル方向に実行し、Concat
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x_concat = torch.cat([avg_out, max_out], dim=1)
+        
+        spatial_out = self.conv(x_concat)
+        return self.sigmoid(spatial_out)
+
+class CBAM(nn.Module):
+    def __init__(self, channel, reduction=16, kernel_size=7):
+        super(CBAM, self).__init__()
+        self.ca = ChannelAttentionModule(channel, reduction)
+        self.sa = SpatialAttentionModule(kernel_size)
+
+    def forward(self, x):
+        # 1. Channel Attention: F' = Mc(F) * F
+        mc = self.ca(x)
+        x = x * mc 
+        
+        # 2. Spatial Attention: F'' = Ms(F') * F'
+        ms = self.sa(x)
+        x = x * ms 
+        return x
+
+# -------------------------------------------------------------------
+# ResnetBlock の CBAM 対応版
+# -------------------------------------------------------------------
+
+class ResnetBlockWithCBAM(ResnetBlock):
+    """ResnetBlockにCBAMを組み込んだバージョン"""
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
+        super(ResnetBlockWithCBAM, self).__init__(dim, padding_type, norm_layer, use_dropout, use_bias)
+        # CBAMモジュールを初期化 (チャネル数はdim)
+        self.cbam = CBAM(dim) 
+
+    def forward(self, x):
+        """Forward function (with skip connections and CBAM)"""
+        out = self.conv_block(x)  # Convブロックの実行
+        out = self.cbam(out)      # CBAMの適用
+        out = x + out             # 残差接続
+        return out
+
+# -------------------------------------------------------------------
+# ResnetGenerator の CBAM 対応版
+# -------------------------------------------------------------------
+
+class ResnetGeneratorCBAM(ResnetGenerator):
+    """
+    ResnetGenerator の ResNetブロックに CBAM を組み込んだバージョン
+    """
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect', activation = "tanh"):
+        
+        assert(n_blocks >= 0)
+        super(ResnetGenerator, self).__init__() # nn.Moduleの初期化
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):       # add ResNet blocks
+            # ここが変更点: ResnetBlockWithCBAM を使用
+            model += [ResnetBlockWithCBAM(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        if activation == "sigmoid":
+            model += [nn.Sigmoid()]
+        else:
+            model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+        
+        # forward 関数は親クラス（nn.Module）から継承される
+
 
 class ResnetExtentionGenerator(nn.Module):
     """
