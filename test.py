@@ -88,6 +88,6 @@ if __name__ == '__main__':
 
         if opt.input_nc > 1:
             img_path = img_path[int((opt.input_nc-1)/2)]
-        save_eps_images(web_dir, visuals, img_path, opt) # save as .eps
+        # save_eps_images(web_dir, visuals, img_path, opt) # save as .eps
         save_images(webpage, visuals, img_path, opt, aspect_ratio=opt.aspect_ratio, width=opt.display_winsize, use_wandb=opt.use_wandb)
     webpage.save()  # save the HTML

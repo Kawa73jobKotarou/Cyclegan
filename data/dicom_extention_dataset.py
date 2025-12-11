@@ -261,30 +261,39 @@ class DicomExtentionDataset(BaseDataset):
                 A = transform(A, do_flip_lr, do_flip_ud, rotation, self.input_nc_G)
                 B = transform(B, do_flip_lr, do_flip_ud, rotation, self.input_nc_G)
 
-            try:
-                # For A (non-CT)
-                A_filename = A_path.split('/')[-1]
-                A_mask_path = A_path.replace(A_filename, f'masks/Bone/{A_filename.split(".")[0]}.png') # Adjust suffix if not .png
-                A_mask = cv2.imread(A_mask_path, cv2.IMREAD_GRAYSCALE) # Assuming bone masks are images
-            except Exception as e:
-                print(f"Could not load or process A bone mask for {A_path}: {e}")
+            if self.opt.model == "cycleSesim_extention":
+                try:
+                    # For A (non-CT)
+                    A_filename = A_path.split('/')[-1]
+                    A_mask_path = A_path.replace(A_filename, f'masks/Bone/{A_filename.split(".")[0]}.png') # Adjust suffix if not .png
+                    A_mask = cv2.imread(A_mask_path, cv2.IMREAD_GRAYSCALE) # Assuming bone masks are images
+                except Exception as e:
+                    print(f"Could not load or process A bone mask for {A_path}: {e}")
 
-            try:
-                # For B (CT)
-                B_filename = B_path.split('/')[-1]
-                B_mask_path = B_path.replace(B_filename, f'masks/Bone/{B_filename.split(".")[0]}.png') # Adjust suffix if not .png
-                B_mask = cv2.imread(B_mask_path, cv2.IMREAD_GRAYSCALE) # Assuming bone masks are images
-            except Exception as e:
-                print(f"Could not load or process B bone mask for {B_path}: {e}")
+                try:
+                    # For B (CT)
+                    B_filename = B_path.split('/')[-1]
+                    B_mask_path = B_path.replace(B_filename, f'masks/Bone/{B_filename.split(".")[0]}.png') # Adjust suffix if not .png
+                    B_mask = cv2.imread(B_mask_path, cv2.IMREAD_GRAYSCALE) # Assuming bone masks are images
+                except Exception as e:
+                    print(f"Could not load or process B bone mask for {B_path}: {e}")
 
-            return {
-                'A': A,
-                'B': B,
-                'A_paths': A_path,
-                'B_paths': B_path,
-                'A_bone': A_mask,
-                'B_bone': B_mask
-            }
+                return {
+                    'A': A,
+                    'B': B,
+                    'A_paths': A_path,
+                    'B_paths': B_path,
+                    'A_bone': A_mask,
+                    'B_bone': B_mask
+                }
+            else:
+                return {
+                    'A': A,
+                    'B': B,
+                    'A_paths': A_path,
+                    'B_paths': B_path,
+                }
+
         else:
             # A_paths と B_paths のインデックス計算
             def get_slice_paths(paths, index, slice_range):
