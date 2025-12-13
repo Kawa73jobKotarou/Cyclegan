@@ -7,7 +7,7 @@ import torchvision.models as models
 import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
-
+from torch.autograd import Variable
 
 
 ###############################################################################
@@ -158,6 +158,12 @@ def define_G(opt, input_nc, output_nc, ngf, netG, norm='batch', use_dropout=Fals
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
     elif netG == 'resnet_6blocks':
         net = ResnetGenerator(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
+    # --- CBAM Generator の追加 ---
+    elif netG == 'resnet_9blocks_cbam':
+        net = ResnetGeneratorCBAM(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=9)
+    elif netG == 'resnet_6blocks_cbam':
+        net = ResnetGeneratorCBAM(input_nc, output_nc, ngf, norm_layer=norm_layer, use_dropout=use_dropout, n_blocks=6)
+    # ---
     elif netG == 'unet_128':
         net = UnetGenerator(input_nc, output_nc, 7, ngf, norm_layer=norm_layer, use_dropout=use_dropout)
     elif netG == 'unet_256':
@@ -449,7 +455,132 @@ class ResnetBlock(nn.Module):
         out = x + self.conv_block(x)  # add skip connections
         return out
 
-# ResnetBlock の定義は変更しないので、省略します
+# -------------------------------------------------------------------
+# CBAM 関連モジュールの定義
+# -------------------------------------------------------------------
+
+class ChannelAttentionModule(nn.Module):
+    def __init__(self, channel, reduction=16):
+        super(ChannelAttentionModule, self).__init__()
+        self.avg_pool = nn.AdaptiveAvgPool2d(1)
+        self.max_pool = nn.AdaptiveMaxPool2d(1)
+
+        self.shared_MLP = nn.Sequential(
+            nn.Conv2d(channel, channel // reduction, 1, bias=False),
+            nn.ReLU(),
+            nn.Conv2d(channel // reduction, channel, 1, bias=False)
+        )
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = self.shared_MLP(self.avg_pool(x))
+        max_out = self.shared_MLP(self.max_pool(x))
+        out = avg_out + max_out
+        return self.sigmoid(out)
+
+class SpatialAttentionModule(nn.Module):
+    def __init__(self, kernel_size=7):
+        super(SpatialAttentionModule, self).__init__()
+
+        # AvgPoolとMaxPoolをチャネル方向に実行し、Concat
+        self.conv = nn.Conv2d(2, 1, kernel_size, padding=kernel_size//2, bias=False)
+        self.sigmoid = nn.Sigmoid()
+
+    def forward(self, x):
+        avg_out = torch.mean(x, dim=1, keepdim=True)
+        max_out, _ = torch.max(x, dim=1, keepdim=True)
+        x_concat = torch.cat([avg_out, max_out], dim=1)
+        
+        spatial_out = self.conv(x_concat)
+        return self.sigmoid(spatial_out)
+
+class CBAM(nn.Module):
+    def __init__(self, channel, reduction=16, kernel_size=7):
+        super(CBAM, self).__init__()
+        self.ca = ChannelAttentionModule(channel, reduction)
+        self.sa = SpatialAttentionModule(kernel_size)
+
+    def forward(self, x):
+        # 1. Channel Attention: F' = Mc(F) * F
+        mc = self.ca(x)
+        x = x * mc 
+        
+        # 2. Spatial Attention: F'' = Ms(F') * F'
+        ms = self.sa(x)
+        x = x * ms 
+        return x
+
+# -------------------------------------------------------------------
+# ResnetBlock の CBAM 対応版
+# -------------------------------------------------------------------
+
+class ResnetBlockWithCBAM(ResnetBlock):
+    """ResnetBlockにCBAMを組み込んだバージョン"""
+    def __init__(self, dim, padding_type, norm_layer, use_dropout, use_bias):
+        super(ResnetBlockWithCBAM, self).__init__(dim, padding_type, norm_layer, use_dropout, use_bias)
+        # CBAMモジュールを初期化 (チャネル数はdim)
+        self.cbam = CBAM(dim) 
+
+    def forward(self, x):
+        """Forward function (with skip connections and CBAM)"""
+        out = self.conv_block(x)  # Convブロックの実行
+        out = self.cbam(out)      # CBAMの適用
+        out = x + out             # 残差接続
+        return out
+
+# -------------------------------------------------------------------
+# ResnetGenerator の CBAM 対応版
+# -------------------------------------------------------------------
+
+class ResnetGeneratorCBAM(ResnetGenerator):
+    """
+    ResnetGenerator の ResNetブロックに CBAM を組み込んだバージョン
+    """
+    def __init__(self, input_nc, output_nc, ngf=64, norm_layer=nn.BatchNorm2d, use_dropout=False, n_blocks=6, padding_type='reflect', activation = "tanh"):
+        
+        assert(n_blocks >= 0)
+        super(ResnetGenerator, self).__init__() # nn.Moduleの初期化
+        if type(norm_layer) == functools.partial:
+            use_bias = norm_layer.func == nn.InstanceNorm2d
+        else:
+            use_bias = norm_layer == nn.InstanceNorm2d
+
+        model = [nn.ReflectionPad2d(3),
+                 nn.Conv2d(input_nc, ngf, kernel_size=7, padding=0, bias=use_bias),
+                 norm_layer(ngf),
+                 nn.ReLU(True)]
+
+        n_downsampling = 2
+        for i in range(n_downsampling):  # add downsampling layers
+            mult = 2 ** i
+            model += [nn.Conv2d(ngf * mult, ngf * mult * 2, kernel_size=3, stride=2, padding=1, bias=use_bias),
+                      norm_layer(ngf * mult * 2),
+                      nn.ReLU(True)]
+
+        mult = 2 ** n_downsampling
+        for i in range(n_blocks):       # add ResNet blocks
+            # ここが変更点: ResnetBlockWithCBAM を使用
+            model += [ResnetBlockWithCBAM(ngf * mult, padding_type=padding_type, norm_layer=norm_layer, use_dropout=use_dropout, use_bias=use_bias)]
+
+        for i in range(n_downsampling):  # add upsampling layers
+            mult = 2 ** (n_downsampling - i)
+            model += [nn.ConvTranspose2d(ngf * mult, int(ngf * mult / 2),
+                                         kernel_size=3, stride=2,
+                                         padding=1, output_padding=1,
+                                         bias=use_bias),
+                      norm_layer(int(ngf * mult / 2)),
+                      nn.ReLU(True)]
+        model += [nn.ReflectionPad2d(3)]
+        model += [nn.Conv2d(ngf, output_nc, kernel_size=7, padding=0)]
+        if activation == "sigmoid":
+            model += [nn.Sigmoid()]
+        else:
+            model += [nn.Tanh()]
+
+        self.model = nn.Sequential(*model)
+        
+        # forward 関数は親クラス（nn.Module）から継承される
+
 
 class ResnetExtentionGenerator(nn.Module):
     """
@@ -1241,3 +1372,87 @@ class SwinUnet(nn.Module):
             # print(msg)
         else:
             print("none pretrain")
+
+class SSIMLoss(torch.nn.Module):
+    def forward(self, x1, x2):
+        # SSIM値を計算
+        ssim_value = ssim(x1, x2) # ssim関数は別途定義が必要
+        # 論文の損失項は (1 - SSIM) [cite: 335]
+        return 1.0 - ssim_value
+    
+def gaussian_kernel(size, sigma):
+    """
+    SSIMで一般的に使用されるガウシアンカーネルを生成します。
+    """
+    # 1D ガウス分布の生成
+    coords = torch.arange(size).to(dtype=torch.float32)
+    coords -= size // 2
+    g = torch.exp(-(coords**2) / (2 * sigma**2))
+    g /= g.sum()
+
+    # 2D カーネルの生成 (外積)
+    g_2d = g[:, None] * g[None, :]
+    g_2d /= g_2d.sum() # 正規化
+    
+    # 畳み込み用の形状 (1, 1, size, size) に変換
+    return g_2d.unsqueeze(0).unsqueeze(0)
+
+def ssim(img1, img2, window_size=11, size_average=True, C1=0.01**2, C2=0.03**2):
+    """
+    構造的類似性指数 (SSIM) を計算します。
+    
+    Args:
+        img1 (Tensor): 1枚目の画像（形状: [N, C, H, W]）
+        img2 (Tensor): 2枚目の画像（形状: [N, C, H, W]）
+        window_size (int): 局所的なSSIMを計算するためのウィンドウサイズ
+        size_average (bool): 結果を平均するかどうか
+        C1 (float): 輝度安定化のための定数 (l)
+        C2 (float): コントラスト安定化のための定数 (c)
+        
+    Returns:
+        Tensor: 計算されたSSIM値 (サイズ平均化されている場合はスカラー)
+    """
+    
+    # チャンネル数
+    channel = img1.size(1)
+    
+    # ガウシアンカーネルの準備
+    # sigma は一般的に window_size の 1/4 ~ 1/3 程度
+    window = gaussian_kernel(window_size, sigma=1.5).to(img1.device)
+    window = window.expand(channel, 1, window_size, window_size) # チャンネル方向に拡張
+
+    # 畳み込みの引数設定
+    padding = window_size // 2
+    groups = channel
+
+    # 1. 平均 (μ) の計算
+    mu1 = F.conv2d(img1, window, padding=padding, groups=groups)
+    mu2 = F.conv2d(img2, window, padding=padding, groups=groups)
+
+    # 2. 平均の二乗 (μ^2) と積 (μ1μ2) の計算
+    mu1_sq = mu1.pow(2)
+    mu2_sq = mu2.pow(2)
+    mu1_mu2 = mu1 * mu2
+
+    # 3. 分散 (σ^2) と共分散 (σ12) の計算
+    sigma1_sq = F.conv2d(img1.pow(2), window, padding=padding, groups=groups) - mu1_sq
+    sigma2_sq = F.conv2d(img2.pow(2), window, padding=padding, groups=groups) - mu2_sq
+    sigma12 = F.conv2d(img1 * img2, window, padding=padding, groups=groups) - mu1_mu2
+
+    # 4. SSIMの計算
+    # 輝度 (Luminance) の項
+    numerator1 = 2 * mu1_mu2 + C1
+    denominator1 = mu1_sq + mu2_sq + C1
+    
+    # コントラストと構造の項 (論文ではC3=C2/2だが、ここでは標準的な結合形式を使用)
+    numerator2 = 2 * sigma12 + C2
+    denominator2 = sigma1_sq + sigma2_sq + C2
+
+    # SSIMの結合 (要素ごとの乗算)
+    ssim_map = (numerator1 * numerator2) / (denominator1 * denominator2)
+    
+    # サイズ平均化 (損失関数として使用する場合)
+    if size_average:
+        return ssim_map.mean()
+    else:
+        return ssim_map
